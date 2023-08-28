@@ -6,7 +6,6 @@ import (
 	"net/http/httputil"
 )
 
-
 type loggingTransport struct{}
 
 func (s *loggingTransport) RoundTrip(r *http.Request) (*http.Response, error) {

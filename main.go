@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"reflect"
 	"strings"
 	"time"
 
@@ -43,7 +44,7 @@ func main() {
 				Name:  "whoami",
 				Usage: "github user identification",
 				Action: func(cCtx *cli.Context) error {
-					level.Info(*l).Log("msg", "whoami")
+					level.Debug(*l).Log("msg", "whoami")
 					return nil
 				},
 			},
@@ -51,7 +52,7 @@ func main() {
 				Name:  "login",
 				Usage: "github login",
 				Action: func(cCtx *cli.Context) error {
-					level.Info(*l).Log("msg", "login", "client id", CLIENT_ID)
+					level.Debug(*l).Log("msg", "login", "client id", CLIENT_ID)
 					login(l, CLIENT_ID, SECRET_ID)
 					return nil
 				},
@@ -64,50 +65,18 @@ func main() {
 	}
 }
 
-// parseResponse function parses a response from the GitHub REST API.
-// When the response status is 200 OK or 201 Created, the function returns the parsed response body.
-// Otherwise, the function prints the response and body an exits the program.
-func parseResponse(l *log.Logger, resp *http.Response) (interface{}, error) {
-	// // Get the response body as a string.
-	// bodyBytes, err := io.ReadAll(resp.Body)
-	// if err != nil {
-	// 	level.Error(*l).Log("msg", "fatal", "error", err)
-	// }
-
-	// s := resp.StatusCode
-	// if s != http.StatusOK || s != http.StatusCreated {
-	// 	bodyString := string(bodyBytes)
-	// 	level.Error(*l).Log("msg", "requestDeviceCode", "status_code", s, "error", bodyString)
-	// 	return nil, errors.New("failed to post form")
-	// }
-
-	// var f map[string]interface{}
-	// if err := json.Unmarshal(bodyBytes, &f); err != nil {
-	// 	return nil, err
-	// }
-
-	var j interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&j); err != nil {
-		return nil, err
-	}
-
-	return j, nil
-}
-
-
 type DeviceCodeResponse struct {
-	DeviceCode string `json:"device_code"`
-	UserCode string `json:"user_code"`
+	DeviceCode      string `json:"device_code"`
+	UserCode        string `json:"user_code"`
 	VerificationURI string `json:"verification_uri"`
-	ExpiresIn int `json:"expires_in"`
-	Interval int `json:"interval"`
+	ExpiresIn       int    `json:"expires_in"`
+	Interval        int    `json:"interval"`
 }
 
 // requestDeviceCode function makes a POST request to https://github.com/login/device/code and
 // returns the response.
 func requestDeviceCode(l *log.Logger, clientID, secretID string) (DeviceCodeResponse, error) {
-	var d DeviceCodeResponse
-
+	var r DeviceCodeResponse
 	uri := "https://github.com/login/device/code"
 
 	// Add the client ID to the request.
@@ -118,7 +87,7 @@ func requestDeviceCode(l *log.Logger, clientID, secretID string) (DeviceCodeResp
 	// Create a new request with the POST method.
 	req, err := http.NewRequest("POST", uri, strings.NewReader(form.Encode()))
 	if err != nil {
-		return d, err
+		return r, err
 	}
 
 	// Add the explicit headers to the request.
@@ -128,42 +97,61 @@ func requestDeviceCode(l *log.Logger, clientID, secretID string) (DeviceCodeResp
 	// Send the request.
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return d, err
+		return r, err
 	}
 	defer resp.Body.Close()
 
-	level.Debug(*l).Log("msg", "requestDeviceCode", "status_code", resp.StatusCode)
+	level.Debug(*l).Log("msg", "request Device Code", "status_code", resp.StatusCode)
 
 	// Check the response status code.
 	if resp.StatusCode != http.StatusOK {
-		return d, fmt.Errorf("failed to get device code. status_code: %d", resp.StatusCode)
+		return r, fmt.Errorf("failed to get device code. status_code: %d", resp.StatusCode)
 	}
 
 	// Get the response body as a JSON object.
-	err = json.NewDecoder(resp.Body).Decode(&d)
+	err = json.NewDecoder(resp.Body).Decode(&r)
 	if err != nil {
-		return d, err
+		return r, err
 	}
 
-	return d, nil
+	// Close the response body.
+	resp.Body.Close()
+	return r, nil
+}
+
+type RequestTokenResponse struct {
+	AccessToken string `json:"access_token"`
+	TokenType   string `json:"tokenType"`
+	Scope       string `json:"scope"`
+	Error       string `json:"error"`
+	ErrorDescription       string `json:"error_description"`
+	ErrorURI       string `json:"error_uri"`
+	Interval		int    `json:"interval"`
 }
 
 // requestToken function makes a POST request to https://github.com/login/oauth/access_token
 // and returns the response.
-func requestToken(l *log.Logger, clientID, deviceCode string) (*http.Response, error) {
+func requestToken(l *log.Logger, clientID, deviceCode string) (RequestTokenResponse, error) {
+	var r RequestTokenResponse
 	uri := "https://github.com/login/oauth/access_token"
 
-	// Create a new request with the POST method.
-	req, err := http.NewRequest("POST", uri, nil)
-	if err != nil {
-		return nil, err
-	}
 
-	// Add the explicit parameters to the request.
-	req.Form = url.Values{
-		"client_id":   {clientID},
-		"device_code": {deviceCode},
-		"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
+	// todo: toggle debugging
+	client := http.Client{
+		Transport: &loggingTransport{},
+	}
+	// client := http.Client{}
+
+	// Add the client ID to the request.
+	form := url.Values{}
+	form.Add("client_id", clientID)
+	form.Add("device_code", deviceCode)
+	form.Add("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
+
+	// Create a new request with the POST method.
+	req, err := http.NewRequest("POST", uri, strings.NewReader(form.Encode()))
+	if err != nil {
+		return r, err
 	}
 
 	// Add the explicit headers to the request.
@@ -171,39 +159,78 @@ func requestToken(l *log.Logger, clientID, deviceCode string) (*http.Response, e
 	req.Header.Set("Accept", "application/json")
 
 	// Send the request.
-	response, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return r, err
+	}
+	defer resp.Body.Close()
+
+	level.Debug(*l).Log("msg", "request Token", "status_code", resp.StatusCode)
+
+	// Check the response status code.
+	if resp.StatusCode != http.StatusOK {
+		return r, fmt.Errorf("failed to request token. status_code: %d", resp.StatusCode)
+	}
+
+	// Get the response body as a JSON object.
+	err = json.NewDecoder(resp.Body).Decode(&r)
+	if err != nil {
+		return r, err
+	}
+
+	if r.Error != "" {
+		return r, fmt.Errorf(r.Error)
 	}
 
 	// Close the response body.
-	response.Body.Close()
+	resp.Body.Close()
+	return r, nil
+}
 
-	return response, nil
+// wait function sleep for specified interval
+func wait(l *log.Logger, interval int) {
+	// Wait, then poll again.
+	time.Sleep(time.Duration(interval) * time.Second)
+	// Printed after sleep is over
+	level.Debug(*l).Log("msg", "Rest is good")
 }
 
 // pollForToken function polls https://github.com/login/oauth/access_token at the specified interval
 // until GitHub responds with an access_token parameter instead of an error parameter.
 // Then, it writes the user access token to a file and restricts the permissions on the file.
 func pollForToken(l *log.Logger, clientID, deviceCode string, interval int) {
+	Loop:
+		for {
+			i := interval
+			t, err := requestToken(l, clientID, deviceCode)
 
-	for {
-		response, err := requestToken(l, clientID, deviceCode)
-		r, _ := parseResponse(l, response)
+			value := reflect.ValueOf(t)
+			field := value.FieldByName("Interval")
+			if field.IsValid() {
+				i = t.Interval
+			} 
 
-		if err != nil {
+			level.Debug(*l).Log("msg", "ping")
+			time.Sleep(time.Duration(i) * time.Second)
+			level.Debug(*l).Log("msg", "pong")
+			
+			if err == nil {
+				level.Debug(*l).Log("msg", "poll for token", "access_token", t.AccessToken)
+				fmt.Println("Login successful.")
+				return
+			}
+
+			level.Debug(*l).Log("msg", "poll for token", "error", err)
 			switch err {
 			case fmt.Errorf("authorization_pending"):
 				// The user has not yet entered the code.
-				// Wait, then poll again.
-				time.Sleep(time.Duration(interval) * time.Second)
-				continue
+				wait(l, i)
+				break Loop
 			case fmt.Errorf("slow_down"):
 				// The app polled too fast.
 				// Wait for the interval plus 5 seconds, then poll again.
-				time.Sleep(time.Duration(interval+5) * time.Second)
-				level.Info(*l).Log("msg", "The device code has expired. Please run `login` again.", "error", err)
-				continue
+				wait(l, i+5)
+				break Loop
 			case fmt.Errorf("expired_token"):
 				// The `device_code` expired, and the process needs to restart.
 				level.Info(*l).Log("msg", "The device code has expired. Please run `login` again.", "error", err)
@@ -213,20 +240,9 @@ func pollForToken(l *log.Logger, clientID, deviceCode string, interval int) {
 				level.Info(*l).Log("msg", "Login cancelled by user.", "error", err)
 				return
 			default:
-				level.Info(*l).Log("msg", "default", "reponse", response)
-				return
+				level.Info(*l).Log("msg", "unknown failure", "error", err)
 			}
 		}
-
-		// a := r["access_token"]
-		// if err := os.WriteFile("/tmp/token", string(a, 0600); err != nil {
-		// 	fmt.Print("failed to write token to file")
-		// }
-
-		fmt.Print(r)
-
-		break
-	}
 }
 
 // login functionc alls the request_device_code function and gets the verification_uri, user_code, device_code,
@@ -240,22 +256,13 @@ func login(l *log.Logger, clientID, secretID string) {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println(r)
 
-	// // get values
-	// resp, err := parseResponse(l, r)
-	// if err != nil {
-	// 	panic(err)
-	// }
-	// level.Debug(*l).Log("msg", "json", "response", resp)
-	//verification_uri, user_code, device_code, interval
+	level.Debug(*l).Log("msg", "response", "device_code", r.DeviceCode, "user_code", r.UserCode, "verification_uri", r.VerificationURI)
 
-	// var code string
-	// fmt.Println("Please visit: %s", verification_uri)
-	// fmt.Println("and enter code:")
-	// fmt.Scanf("%s", &code)
+	fmt.Printf("Visit: %s\n", r.VerificationURI)
+	fmt.Printf("Provide code: %s\n", r.UserCode)
 
-	// pollForToken(device_code, interval)
-
-	// fmt.Println( "Successfully authenticated!")
+	var userConfirm string
+	fmt.Scanf("%s", &userConfirm)
+	pollForToken(l, clientID, r.DeviceCode, r.Interval)
 }
