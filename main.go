@@ -73,16 +73,20 @@ type DeviceCodeResponse struct {
 	Interval        int    `json:"interval"`
 }
 
-// requestDeviceCode function makes a POST request to https://github.com/login/device/code and
-// returns the response.
-func requestDeviceCode(l *log.Logger, clientID, secretID string) (DeviceCodeResponse, error) {
-	var r DeviceCodeResponse
-	uri := "https://github.com/login/device/code"
+type RequestTokenResponse struct {
+	AccessToken      string `json:"access_token"`
+	TokenType        string `json:"tokenType"`
+	Scope            string `json:"scope"`
+	Error            string `json:"error"`
+	ErrorDescription string `json:"error_description"`
+	ErrorURI         string `json:"error_uri"`
+	Interval         int    `json:"interval"`
+}
 
-	// Add the client ID to the request.
-	form := url.Values{}
-	form.Add("client_id", clientID)
-	form.Add("secret_id", secretID)
+// postForm function is a generic allowing posting of form data to a given URI and returning
+// the correct response
+func postForm[V DeviceCodeResponse | RequestTokenResponse](l *log.Logger, uri string, form url.Values) (V, error) {
+	var r V
 
 	// Create a new request with the POST method.
 	req, err := http.NewRequest("POST", uri, strings.NewReader(form.Encode()))
@@ -94,8 +98,14 @@ func requestDeviceCode(l *log.Logger, clientID, secretID string) (DeviceCodeResp
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
+	// todo: toggle debugging
+	client := http.Client{
+		Transport: &loggingTransport{},
+	}
+	// client := http.Client{}
+
 	// Send the request.
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return r, err
 	}
@@ -119,28 +129,28 @@ func requestDeviceCode(l *log.Logger, clientID, secretID string) (DeviceCodeResp
 	return r, nil
 }
 
-type RequestTokenResponse struct {
-	AccessToken string `json:"access_token"`
-	TokenType   string `json:"tokenType"`
-	Scope       string `json:"scope"`
-	Error       string `json:"error"`
-	ErrorDescription       string `json:"error_description"`
-	ErrorURI       string `json:"error_uri"`
-	Interval		int    `json:"interval"`
+// requestDeviceCode function performs a POST request to https://github.com/login/device/code
+func requestDeviceCode(l *log.Logger, clientID, secretID string) (DeviceCodeResponse, error) {
+	var r DeviceCodeResponse
+	uri := "https://github.com/login/device/code"
+
+	// Add the client ID to the request.
+	form := url.Values{}
+	form.Add("client_id", clientID)
+	form.Add("secret_id", secretID)
+
+	r, err := postForm[DeviceCodeResponse](l, uri, form)
+	if err != nil {
+		return r, err
+	}
+
+	return r, nil
 }
 
-// requestToken function makes a POST request to https://github.com/login/oauth/access_token
-// and returns the response.
+// requestToken function performs a POST request to https://github.com/login/oauth/access_token
 func requestToken(l *log.Logger, clientID, deviceCode string) (RequestTokenResponse, error) {
 	var r RequestTokenResponse
 	uri := "https://github.com/login/oauth/access_token"
-
-
-	// todo: toggle debugging
-	client := http.Client{
-		Transport: &loggingTransport{},
-	}
-	// client := http.Client{}
 
 	// Add the client ID to the request.
 	form := url.Values{}
@@ -148,42 +158,11 @@ func requestToken(l *log.Logger, clientID, deviceCode string) (RequestTokenRespo
 	form.Add("device_code", deviceCode)
 	form.Add("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
 
-	// Create a new request with the POST method.
-	req, err := http.NewRequest("POST", uri, strings.NewReader(form.Encode()))
+	r, err := postForm[RequestTokenResponse](l, uri, form)
 	if err != nil {
 		return r, err
 	}
 
-	// Add the explicit headers to the request.
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-
-	// Send the request.
-	resp, err := client.Do(req)
-	if err != nil {
-		return r, err
-	}
-	defer resp.Body.Close()
-
-	level.Debug(*l).Log("msg", "request Token", "status_code", resp.StatusCode)
-
-	// Check the response status code.
-	if resp.StatusCode != http.StatusOK {
-		return r, fmt.Errorf("failed to request token. status_code: %d", resp.StatusCode)
-	}
-
-	// Get the response body as a JSON object.
-	err = json.NewDecoder(resp.Body).Decode(&r)
-	if err != nil {
-		return r, err
-	}
-
-	if r.Error != "" {
-		return r, fmt.Errorf(r.Error)
-	}
-
-	// Close the response body.
-	resp.Body.Close()
 	return r, nil
 }
 
@@ -199,50 +178,50 @@ func wait(l *log.Logger, interval int) {
 // until GitHub responds with an access_token parameter instead of an error parameter.
 // Then, it writes the user access token to a file and restricts the permissions on the file.
 func pollForToken(l *log.Logger, clientID, deviceCode string, interval int) {
-	Loop:
-		for {
-			i := interval
-			t, err := requestToken(l, clientID, deviceCode)
+Loop:
+	for {
+		i := interval
+		t, err := requestToken(l, clientID, deviceCode)
 
-			value := reflect.ValueOf(t)
-			field := value.FieldByName("Interval")
-			if field.IsValid() {
-				i = t.Interval
-			} 
-
-			level.Debug(*l).Log("msg", "ping")
-			time.Sleep(time.Duration(i) * time.Second)
-			level.Debug(*l).Log("msg", "pong")
-			
-			if err == nil {
-				level.Debug(*l).Log("msg", "poll for token", "access_token", t.AccessToken)
-				fmt.Println("Login successful.")
-				return
-			}
-
-			level.Debug(*l).Log("msg", "poll for token", "error", err)
-			switch err {
-			case fmt.Errorf("authorization_pending"):
-				// The user has not yet entered the code.
-				wait(l, i)
-				break Loop
-			case fmt.Errorf("slow_down"):
-				// The app polled too fast.
-				// Wait for the interval plus 5 seconds, then poll again.
-				wait(l, i+5)
-				break Loop
-			case fmt.Errorf("expired_token"):
-				// The `device_code` expired, and the process needs to restart.
-				level.Info(*l).Log("msg", "The device code has expired. Please run `login` again.", "error", err)
-				return
-			case fmt.Errorf("access_denied"):
-				// The user cancelled the process. Stop polling.
-				level.Info(*l).Log("msg", "Login cancelled by user.", "error", err)
-				return
-			default:
-				level.Info(*l).Log("msg", "unknown failure", "error", err)
-			}
+		value := reflect.ValueOf(t)
+		field := value.FieldByName("Interval")
+		if field.IsValid() {
+			i = t.Interval
 		}
+
+		level.Debug(*l).Log("msg", "ping")
+		time.Sleep(time.Duration(i) * time.Second)
+		level.Debug(*l).Log("msg", "pong")
+
+		if err == nil {
+			level.Debug(*l).Log("msg", "poll for token", "access_token", t.AccessToken)
+			fmt.Println("Login successful.")
+			return
+		}
+
+		level.Debug(*l).Log("msg", "poll for token", "error", err)
+		switch err {
+		case fmt.Errorf("authorization_pending"):
+			// The user has not yet entered the code.
+			wait(l, i)
+			break Loop
+		case fmt.Errorf("slow_down"):
+			// The app polled too fast.
+			// Wait for the interval plus 5 seconds, then poll again.
+			wait(l, i+5)
+			break Loop
+		case fmt.Errorf("expired_token"):
+			// The `device_code` expired, and the process needs to restart.
+			level.Info(*l).Log("msg", "The device code has expired. Please run `login` again.", "error", err)
+			return
+		case fmt.Errorf("access_denied"):
+			// The user cancelled the process. Stop polling.
+			level.Info(*l).Log("msg", "Login cancelled by user.", "error", err)
+			return
+		default:
+			level.Info(*l).Log("msg", "unknown failure", "error", err)
+		}
+	}
 }
 
 // login functionc alls the request_device_code function and gets the verification_uri, user_code, device_code,

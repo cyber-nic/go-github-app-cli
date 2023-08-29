@@ -6,6 +6,8 @@ import (
 	"net/http/httputil"
 )
 
+// https://www.jvt.me/posts/2023/03/11/go-debug-http/
+
 type loggingTransport struct{}
 
 func (s *loggingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
