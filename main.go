@@ -26,15 +26,15 @@ func main() {
 	ctx := context.Background()
 
 	app := &cli.App{
-		Name:  "AuditLab",
-		Usage: "tool for auditing",
+		Name:  "github-app",
+		Usage: "github app cli",
 		Before: func(cCtx *cli.Context) error {
 			// add logger and log level to context
 			ctx = contextWithLogger(ctx, newLogger(llvl))
-			ctx = context.WithValue(ctx, LOG_LEVEL{},  llvl)
+			ctx = context.WithValue(ctx, LOG_LEVEL{}, llvl)
 			// add github creds to context
-			ctx = context.WithValue(ctx, CLIENT_ID{},  os.Getenv("GITHUB_CLIENT_ID"))
-			ctx = context.WithValue(ctx, CLIENT_SECRET{},  os.Getenv("GITHUB_CLIENT_SECRET"))
+			ctx = context.WithValue(ctx, CLIENT_ID{}, os.Getenv("GITHUB_CLIENT_ID"))
+			ctx = context.WithValue(ctx, CLIENT_SECRET{}, os.Getenv("GITHUB_CLIENT_SECRET"))
 
 			l = loggerFromContext(ctx)
 			return nil
@@ -54,8 +54,8 @@ func main() {
 				Name:  "whoami",
 				Usage: "github user identification",
 				Action: func(cCtx *cli.Context) error {
-
 					level.Info(l).Log("msg", "whoami")
+					whoami(ctx)
 					return nil
 				},
 			},
@@ -63,7 +63,7 @@ func main() {
 				Name:  "login",
 				Usage: "github login",
 				Action: func(cCtx *cli.Context) error {
-					level.Info(l).Log("msg", "login", "client id", ctx.Value("client_id"))
+					level.Info(l).Log("msg", "login", "client_id", ctx.Value(CLIENT_ID{}).(string))
 					login(ctx)
 					return nil
 				},
@@ -76,7 +76,14 @@ func main() {
 	}
 }
 
-type DeviceCodeResponse struct {
+
+// https://docs.github.com/en/rest/users/users?apiVersion=2022-11-28#get-the-authenticated-user
+type GithubUser struct {
+	Login string `json:"login"`
+	Email string `json:"email"`
+}
+
+type GithubDeviceCode struct {
 	DeviceCode      string `json:"device_code"`
 	UserCode        string `json:"user_code"`
 	VerificationURI string `json:"verification_uri"`
@@ -84,7 +91,7 @@ type DeviceCodeResponse struct {
 	Interval        int    `json:"interval"`
 }
 
-type RequestTokenResponse struct {
+type GithubRequestToken struct {
 	AccessToken      string `json:"access_token"`
 	TokenType        string `json:"tokenType"`
 	Scope            string `json:"scope"`
@@ -94,13 +101,53 @@ type RequestTokenResponse struct {
 	Interval         int    `json:"interval"`
 }
 
+// HTTPRequest function performs an http post
+func HTTPRequest[V GithubDeviceCode | GithubRequestToken | GithubUser](ctx context.Context, req *http.Request) (V, error) {
+	l := loggerFromContext(ctx)
+	var r V
+	
+	// toggle debugging
+	client := http.Client{}
+	if ctx.Value(LOG_LEVEL{}) == "debug" {
+		level.Info(l).Log("msg", "http debugging enabled")
+		client = http.Client{
+			Transport: &loggingTransport{},
+		}
+	}
+
+	// send request
+	resp, err := client.Do(req)
+	if err != nil {
+		return r, err
+	}
+	defer resp.Body.Close()
+
+	// check the response status code
+	if resp.StatusCode != http.StatusOK {
+		return r, fmt.Errorf("request failed. status_code: %d", resp.StatusCode)
+	}
+
+	// Get the response body as a JSON object.
+	level.Info(l).Log("msg", "decode response")
+	err = json.NewDecoder(resp.Body).Decode(&r)
+	if err != nil {
+		return r, err
+	}
+
+	// Close the response body.
+	resp.Body.Close()
+
+	return r, nil
+}
+
 // postForm function is a generic allowing posting of form data to a given URI and returning
 // the correct response
-func postForm[V DeviceCodeResponse | RequestTokenResponse](ctx context.Context, uri string, form url.Values) (V, error) {
-	var r V
+func postForm[V GithubDeviceCode | GithubRequestToken](ctx context.Context, uri string, form url.Values) (V, error) {
 	l := loggerFromContext(ctx)
+	var r V
 
 	// Create a new request with the POST method.
+	level.Info(l).Log("msg", "POST", "uri", uri)
 	req, err := http.NewRequest("POST", uri, strings.NewReader(form.Encode()))
 	if err != nil {
 		return r, err
@@ -110,44 +157,19 @@ func postForm[V DeviceCodeResponse | RequestTokenResponse](ctx context.Context, 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	// toggle debugging
-	var client http.Client
-	if ctx.Value(LOG_LEVEL{}) == "debug" {
-		client = http.Client{
-			Transport: &loggingTransport{},
-		}
-	} else {
-		client = http.Client{}
-	}
-
-	// Send the request.
-	resp, err := client.Do(req)
-	if err != nil {
-		return r, err
-	}
-	defer resp.Body.Close()
-
-	level.Info(l).Log("msg", "request Device Code", "status_code", resp.StatusCode)
-
-	// Check the response status code.
-	if resp.StatusCode != http.StatusOK {
-		return r, fmt.Errorf("failed to get device code. status_code: %d", resp.StatusCode)
-	}
-
-	// Get the response body as a JSON object.
-	err = json.NewDecoder(resp.Body).Decode(&r)
+	// perform request
+	level.Info(l).Log("msg", "performing request")
+	r, err = HTTPRequest[V](ctx, req)
 	if err != nil {
 		return r, err
 	}
 
-	// Close the response body.
-	resp.Body.Close()
 	return r, nil
 }
 
 // requestDeviceCode function performs a POST request to https://github.com/login/device/code
-func requestDeviceCode(ctx context.Context, clientID, secretID string) (DeviceCodeResponse, error) {
-	var r DeviceCodeResponse
+func requestDeviceCode(ctx context.Context, clientID, secretID string) (GithubDeviceCode, error) {
+	var r GithubDeviceCode
 	uri := "https://github.com/login/device/code"
 
 	// Add the client ID to the request.
@@ -155,7 +177,7 @@ func requestDeviceCode(ctx context.Context, clientID, secretID string) (DeviceCo
 	form.Add("client_id", clientID)
 	form.Add("secret_id", secretID)
 
-	r, err := postForm[DeviceCodeResponse](ctx, uri, form)
+	r, err := postForm[GithubDeviceCode](ctx, uri, form)
 	if err != nil {
 		return r, err
 	}
@@ -164,8 +186,8 @@ func requestDeviceCode(ctx context.Context, clientID, secretID string) (DeviceCo
 }
 
 // requestToken function performs a POST request to https://github.com/login/oauth/access_token
-func requestToken(ctx context.Context, clientID, deviceCode string) (RequestTokenResponse, error) {
-	var r RequestTokenResponse
+func requestToken(ctx context.Context, clientID, deviceCode string) (GithubRequestToken, error) {
+	var r GithubRequestToken
 	uri := "https://github.com/login/oauth/access_token"
 
 	// Add the client ID to the request.
@@ -174,7 +196,7 @@ func requestToken(ctx context.Context, clientID, deviceCode string) (RequestToke
 	form.Add("device_code", deviceCode)
 	form.Add("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
 
-	r, err := postForm[RequestTokenResponse](ctx, uri, form)
+	r, err := postForm[GithubRequestToken](ctx, uri, form)
 	if err != nil {
 		return r, err
 	}
@@ -194,9 +216,7 @@ func wait(l log.Logger, interval int) {
 func pollForToken(ctx context.Context, clientID, deviceCode string, interval int) error {
 	l := loggerFromContext(ctx)
 	i := interval
-	var t RequestTokenResponse
 
-	Loop:
 	for {
 		t, err := requestToken(ctx, clientID, deviceCode)
 		if err != nil {
@@ -231,9 +251,18 @@ func pollForToken(ctx context.Context, clientID, deviceCode string, interval int
 			// The user cancelled the process. Stop polling.
 			return fmt.Errorf(t.Error)
 		default:
-			break Loop
+			if err := writeTokenToFile(ctx, t.AccessToken); err != nil {
+				return err
+			}
+
+			fmt.Printf("Successfully authenticated!\n")
+			return nil
 		}
 	}
+}
+
+func writeTokenToFile(ctx context.Context, token string) error {
+	l := loggerFromContext(ctx)
 
 	// get home dir
 	home, err := os.UserHomeDir()
@@ -244,25 +273,27 @@ func pollForToken(ctx context.Context, clientID, deviceCode string, interval int
 
 	// create out dir
 	d := home + "/.github"
-	err = os.MkdirAll(d, 0744)
-	if err !=	nil {
-		level.Error(l).Log("msg", "failed to write access_token to file", "directory", d, "error", err)
-		panic(err)
+	if _, err := os.Stat(d); os.IsNotExist(err) {
+		err = os.MkdirAll(d, 0700)
+		if err != nil {
+			level.Error(l).Log("msg", "failed to write access_token to file", "directory", d, "error", err)
+			panic(err)
+		}
 	}
 
-	// write access token
-	filename := d + "/credentials"
-	err = os.WriteFile(filename, []byte(t.AccessToken), 0644)
-	if err !=	nil {
+	// write token to file
+	filename := d + "/token"
+	err = os.WriteFile(filename, []byte(token+"\n"), 0644)
+	if err != nil {
 		level.Error(l).Log("msg", "failed to write access token to file", "filename", filename, "error", err)
 		panic(err)
 	}
 
-	fmt.Printf("Successfully authenticated!")
+	level.Info(l).Log("msg", "access token writen to file", "filename", filename)
 	return nil
 }
 
-// login functionc alls the request_device_code function and gets the verification_uri, user_code, device_code,
+// login function calls the request_device_code function and gets the verification_uri, user_code, device_code,
 // and interval parameters from the response.
 // It prompts users to enter the user_code from the previous step.
 // It calls the poll_for_token to poll GitHub for an access token.
@@ -273,6 +304,7 @@ func login(ctx context.Context) {
 	s := ctx.Value(CLIENT_SECRET{}).(string)
 
 	// get device code
+	level.Info(l).Log("msg", "requesting device code")
 	r, err := requestDeviceCode(ctx, c, s)
 	if err != nil {
 		panic(err)
@@ -289,8 +321,50 @@ func login(ctx context.Context) {
 	fmt.Scanf("%s", &userConfirm)
 
 	// poll for access token
+	level.Info(l).Log("msg", "polling for access token")
 	if err = pollForToken(ctx, c, r.DeviceCode, r.Interval); err != nil {
 		level.Error(l).Log("msg", "failed to retrieve access token", "error", err)
 	}
 
+}
+
+// whoami function gets information about the user with the /user REST API endpoint.
+// It outputs the username that corresponds to the user access token.
+// If the .token file was not found, it prompts the user to run the login function.
+func whoami(ctx context.Context) {
+	l := loggerFromContext(ctx)
+	uri := "https://api.github.com/user"
+
+	// get home dir
+	home, err := os.UserHomeDir()
+	if err != nil {
+		level.Error(l).Log("msg", "failed to get home directory", "error", err)
+		panic(err)
+	}
+
+	// get token
+	f := home + "/.github/token"
+	token, err := os.ReadFile(f)
+	if err != nil {
+		level.Error(l).Log("msg", "failed to read access token from file", "filename", f, "error", err)
+		panic(err)
+	}
+
+	// Create a HTTP request
+	req, err := http.NewRequest("GET", uri, nil)
+	if err != nil {
+		panic(err)
+	}
+
+	// set headers
+	req.Header.Add("Accept", "application/vnd.github+json")
+	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", strings.Trim(string(token), "\n")))
+
+	// perform request
+	u, err := HTTPRequest[GithubUser](ctx, req)
+	if err != nil {
+		panic(err)
+	}
+	
+	fmt.Printf("You are %s\n", u.Login)
 }

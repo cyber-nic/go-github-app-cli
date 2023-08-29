@@ -1,2 +1,2 @@
 build:
-	go build -o ./auditlab ./*.go
+	go build -o ./github-app ./*.go

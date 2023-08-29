@@ -1,4 +1,4 @@
-module auditlab-cli
+module github-app-cli
 
 go 1.20
 
