@@ -16,6 +16,13 @@ $ make
 ./github-app --help
 ```
 
+# setup
+
+```
+export GITHUB_CLIENT_ID=Iv1.fooBar
+export GITHUB_CLIENT_SECRET=BarFoo012345
+```
+
 # login
 
 ```

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -102,9 +103,9 @@ type GithubRequestToken struct {
 }
 
 // HTTPRequest function performs an http post
-func HTTPRequest[V GithubDeviceCode | GithubRequestToken | GithubUser](ctx context.Context, req *http.Request) (V, error) {
+func HTTPRequest(ctx context.Context, req *http.Request) ([]byte, error) {
 	l := loggerFromContext(ctx)
-	var r V
+	var b []byte
 	
 	// toggle debugging
 	client := http.Client{}
@@ -118,26 +119,25 @@ func HTTPRequest[V GithubDeviceCode | GithubRequestToken | GithubUser](ctx conte
 	// send request
 	resp, err := client.Do(req)
 	if err != nil {
-		return r, err
+		return b, err
 	}
 	defer resp.Body.Close()
 
 	// check the response status code
 	if resp.StatusCode != http.StatusOK {
-		return r, fmt.Errorf("request failed. status_code: %d", resp.StatusCode)
+		return b, fmt.Errorf("request failed. status_code: %d", resp.StatusCode)
 	}
 
-	// Get the response body as a JSON object.
-	level.Info(l).Log("msg", "decode response")
-	err = json.NewDecoder(resp.Body).Decode(&r)
-	if err != nil {
-		return r, err
+	// read response body
+	b, error := io.ReadAll(resp.Body)
+	if error != nil {
+		return b, err
 	}
 
 	// Close the response body.
 	resp.Body.Close()
 
-	return r, nil
+	return b, nil
 }
 
 // postForm function is a generic allowing posting of form data to a given URI and returning
@@ -159,7 +159,14 @@ func postForm[V GithubDeviceCode | GithubRequestToken](ctx context.Context, uri 
 
 	// perform request
 	level.Info(l).Log("msg", "performing request")
-	r, err = HTTPRequest[V](ctx, req)
+	b, err := HTTPRequest(ctx, req)
+	if err != nil {
+		return r, err
+	}
+
+	// Get the response body as a JSON object.
+	level.Info(l).Log("msg", "decode response")
+	json.Unmarshal([]byte(b), &r)
 	if err != nil {
 		return r, err
 	}
@@ -334,6 +341,7 @@ func login(ctx context.Context) {
 func whoami(ctx context.Context) {
 	l := loggerFromContext(ctx)
 	uri := "https://api.github.com/user"
+	var u GithubUser
 
 	// get home dir
 	home, err := os.UserHomeDir()
@@ -361,7 +369,14 @@ func whoami(ctx context.Context) {
 	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", strings.Trim(string(token), "\n")))
 
 	// perform request
-	u, err := HTTPRequest[GithubUser](ctx, req)
+	b, err := HTTPRequest(ctx, req)
+	if err != nil {
+		panic(err)
+	}
+
+	// Get the response body as a JSON object.
+	level.Info(l).Log("msg", "decode response")
+	json.Unmarshal([]byte(b), &u)
 	if err != nil {
 		panic(err)
 	}
